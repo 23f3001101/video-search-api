@@ -41,9 +41,10 @@ async def ask(request: VideoRequest):
             "--audio-quality", "0",
             "--output", audio_path,
             "--no-playlist",
+            "--js-runtimes", "nodejs",
             request.video_url
-        ], check=True, capture_output=True)
-
+        ], check=True, capture_output=True)      
+        
         # Step 2: Upload to Gemini Files API
         uploaded_file = genai.upload_file(
             path=audio_path,
