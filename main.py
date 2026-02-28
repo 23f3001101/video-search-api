@@ -46,14 +46,16 @@ async def ask(request: VideoRequest):
         # Step 1: Extract video ID
         video_id = extract_video_id(request.video_url)
 
-        # Step 2: Get transcript
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        # Step 2: Get transcript using new API
+        ytt = YouTubeTranscriptApi()
+        fetched = ytt.fetch(video_id)
+        transcript = fetched.snippets  # new API uses .snippets
 
         # Step 3: Format transcript with timestamps
         transcript_text = ""
         for entry in transcript:
-            ts = seconds_to_hhmmss(entry["start"])
-            transcript_text += f"[{ts}] {entry['text']}\n"
+            ts = seconds_to_hhmmss(entry.start)
+            transcript_text += f"[{ts}] {entry.text}\n"
 
         # Step 4: Ask Gemini to find the timestamp
         model = genai.GenerativeModel("gemini-2.0-flash")
