@@ -1,11 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import os
-import re
-import subprocess
-import tempfile
-import time
+from youtube_transcript_api import YouTubeTranscriptApi
+import os, re, json
 import google.generativeai as genai
 
 app = FastAPI()
@@ -24,71 +21,71 @@ class VideoRequest(BaseModel):
     video_url: str
     topic: str
 
+def extract_video_id(url: str) -> str:
+    patterns = [
+        r"(?:v=|\/)([0-9A-Za-z_-]{11}).*",
+        r"(?:youtu\.be\/)([0-9A-Za-z_-]{11})",
+        r"(?:embed\/)([0-9A-Za-z_-]{11})"
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    raise ValueError("Could not extract video ID from URL")
+
+def seconds_to_hhmmss(seconds: float) -> str:
+    seconds = int(seconds)
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
 @app.post("/ask")
 async def ask(request: VideoRequest):
-    audio_path = None
-    uploaded_file = None
-
     try:
-        # Step 1: Download audio only using yt-dlp
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-            audio_path = tmp.name
+        # Step 1: Extract video ID
+        video_id = extract_video_id(request.video_url)
 
-        subprocess.run([
-            "yt-dlp",
-            "--extract-audio",
-            "--audio-format", "mp3",
-            "--audio-quality", "0",
-            "--output", audio_path,
-            "--no-playlist",
-            "--js-runtimes", "nodejs",
-            request.video_url
-        ], check=True, capture_output=True)      
-        
-        # Step 2: Upload to Gemini Files API
-        uploaded_file = genai.upload_file(
-            path=audio_path,
-            mime_type="audio/mpeg"
-        )
+        # Step 2: Get transcript
+        transcript = YouTubeTranscriptApi.get_transcript(video_id)
 
-        # Step 3: Poll until file is ACTIVE
-        max_wait = 120
-        waited = 0
-        while uploaded_file.state.name != "ACTIVE":
-            if waited >= max_wait:
-                raise HTTPException(status_code=500, detail="File processing timed out")
-            time.sleep(5)
-            waited += 5
-            uploaded_file = genai.get_file(uploaded_file.name)
+        # Step 3: Format transcript with timestamps
+        transcript_text = ""
+        for entry in transcript:
+            ts = seconds_to_hhmmss(entry["start"])
+            transcript_text += f"[{ts}] {entry['text']}\n"
 
         # Step 4: Ask Gemini to find the timestamp
         model = genai.GenerativeModel("gemini-2.0-flash")
 
-        prompt = f"""Listen to this audio and find the exact timestamp when the following topic is first spoken or discussed:
+        prompt = f"""Here is a YouTube video transcript with timestamps in [HH:MM:SS] format.
 
+Find the FIRST timestamp where the following topic is spoken or discussed:
 Topic: "{request.topic}"
 
-Return ONLY a JSON object in this exact format:
+TRANSCRIPT:
+{transcript_text[:50000]}
+
+Return ONLY a JSON object:
 {{"timestamp": "HH:MM:SS"}}
 
 Rules:
-- timestamp must be in HH:MM:SS format (e.g. "00:05:47", "01:23:45")
-- Return the first occurrence only
+- Use exact HH:MM:SS format (e.g. "00:05:47")
+- Return the first occurrence
 - If not found, return "00:00:00"
 """
 
         response = model.generate_content(
-            [uploaded_file, prompt],
+            prompt,
             generation_config=genai.GenerationConfig(
                 response_mime_type="application/json"
             )
         )
 
-        import json
         result = json.loads(response.text)
         timestamp = result.get("timestamp", "00:00:00")
 
-        # Validate HH:MM:SS format
+        # Validate format
         if not re.match(r"^\d{2}:\d{2}:\d{2}$", timestamp):
             timestamp = "00:00:00"
 
@@ -98,16 +95,5 @@ Rules:
             "topic": request.topic
         }
 
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(status_code=400, detail=f"yt-dlp error: {e.stderr.decode()}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        # Cleanup
-        if audio_path and os.path.exists(audio_path):
-            os.remove(audio_path)
-        if uploaded_file:
-            try:
-                genai.delete_file(uploaded_file.name)
-            except:
-                pass
