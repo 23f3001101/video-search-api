@@ -1,7 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from youtube_transcript_api import YouTubeTranscriptApi
 import os, re, json
 import google.generativeai as genai
 
@@ -21,64 +20,34 @@ class VideoRequest(BaseModel):
     video_url: str
     topic: str
 
-def extract_video_id(url: str) -> str:
-    patterns = [
-        r"(?:v=|\/)([0-9A-Za-z_-]{11}).*",
-        r"(?:youtu\.be\/)([0-9A-Za-z_-]{11})",
-        r"(?:embed\/)([0-9A-Za-z_-]{11})"
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    raise ValueError("Could not extract video ID from URL")
-
-def seconds_to_hhmmss(seconds: float) -> str:
-    seconds = int(seconds)
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    s = seconds % 60
-    return f"{h:02d}:{m:02d}:{s:02d}"
-
 @app.post("/ask")
 async def ask(request: VideoRequest):
     try:
-        # Step 1: Extract video ID
-        video_id = extract_video_id(request.video_url)
-
-        # Step 2: Get transcript using new API
-        ytt = YouTubeTranscriptApi()
-        fetched = ytt.fetch(video_id)
-        transcript = fetched.snippets  # new API uses .snippets
-
-        # Step 3: Format transcript with timestamps
-        transcript_text = ""
-        for entry in transcript:
-            ts = seconds_to_hhmmss(entry.start)
-            transcript_text += f"[{ts}] {entry.text}\n"
-
-        # Step 4: Ask Gemini to find the timestamp
         model = genai.GenerativeModel("gemini-2.0-flash")
 
-        prompt = f"""Here is a YouTube video transcript with timestamps in [HH:MM:SS] format.
+        prompt = f"""Watch this YouTube video and find the FIRST timestamp where the following topic is spoken or discussed:
 
-Find the FIRST timestamp where the following topic is spoken or discussed:
 Topic: "{request.topic}"
-
-TRANSCRIPT:
-{transcript_text[:50000]}
 
 Return ONLY a JSON object:
 {{"timestamp": "HH:MM:SS"}}
 
 Rules:
 - Use exact HH:MM:SS format (e.g. "00:05:47")
-- Return the first occurrence
+- Return the first occurrence only
 - If not found, return "00:00:00"
 """
 
         response = model.generate_content(
-            prompt,
+            [
+                {
+                    "file_data": {
+                        "mime_type": "video/youtube",
+                        "file_uri": request.video_url
+                    }
+                },
+                prompt
+            ],
             generation_config=genai.GenerationConfig(
                 response_mime_type="application/json"
             )
@@ -87,7 +56,7 @@ Rules:
         result = json.loads(response.text)
         timestamp = result.get("timestamp", "00:00:00")
 
-        # Validate format
+        # Validate HH:MM:SS format
         if not re.match(r"^\d{2}:\d{2}:\d{2}$", timestamp):
             timestamp = "00:00:00"
 
